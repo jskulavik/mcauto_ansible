@@ -9,7 +9,7 @@
       - path: /data
         size: 1GB
       - path: /data/mongodb
-        size: 450GB
+        size: 150GB
       - path: /data/mongodb/journal
         size: 20GB
       - path: /data/mongodb/logs
