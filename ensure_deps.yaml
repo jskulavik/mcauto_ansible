@@ -1,0 +1,23 @@
+---
+- name: Ensure required system packages are installed
+  hosts: all
+  become: true
+  gather_facts: true
+
+  vars:
+    required_packages:
+      # - cyrus-sasl
+      # - cyrus-sasl-plain
+      # - cyrus-sasl-gssapi
+      # - krb5-libs
+      # - libcurl
+      # - libpcap
+      # - net-snmp
+      # - openldap
+      - openssl
+
+  tasks:
+    - name: Install required packages
+      ansible.builtin.package:
+        name: "{{ required_packages }}"
+        state: present

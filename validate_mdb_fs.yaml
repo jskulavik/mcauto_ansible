@@ -1,0 +1,61 @@
+---
+- name: Configure MongoDB filesystem requirements
+  hosts: all
+  become: yes
+  vars:
+    mongodb_user: mongodb
+    mongodb_group: mongodb
+    mounts:
+      - path: /data
+        size: 1GB
+      - path: /data/mongodb
+        size: 450GB
+      - path: /data/mongodb/journal
+        size: 20GB
+      - path: /data/mongodb/logs
+        size: 30GB
+      - path: /opt/mongodb
+        size: 30GB
+    directories:
+      - /var/lib/mongodb-mms-automation
+      - /var/log/mongodb-mms-automation
+
+  tasks:
+    - name: Ensure MongoDB directories exist
+      file:
+        path: "{{ item.path }}"
+        state: directory
+        owner: "{{ mongodb_user }}"
+        group: "{{ mongodb_group }}"
+        mode: '0755'
+      loop: "{{ mounts }}"
+
+    - name: Ensure MMS automation directories exist
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: "{{ mongodb_user }}"
+        group: "{{ mongodb_group }}"
+        mode: '0755'
+      loop: "{{ directories }}"
+
+    - name: Set ownership on data and mongodb directories
+      file:
+        path: "{{ item }}"
+        owner: "{{ mongodb_user }}"
+        group: "{{ mongodb_group }}"
+        recurse: yes
+        state: directory
+      loop:
+        - /data
+        - /data/mongodb
+        - /opt/mongodb
+
+    - name: Set ownership on MMS automation directories
+      file:
+        path: "{{ item }}"
+        owner: "{{ mongodb_user }}"
+        group: "{{ mongodb_group }}"
+        recurse: yes
+        state: directory
+      loop: "{{ directories }}"

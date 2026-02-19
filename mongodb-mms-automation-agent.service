@@ -1,0 +1,30 @@
+[Unit]
+Description=MongoDB MMS Automation Agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+LimitFSIZE=infinity
+LimitCPU=infinity
+LimitAS=infinity
+LimitNOFILE=64000
+LimitRSS=infinity
+LimitNPROC=64000
+LimitMEMLOCK=infinity
+User=mongodb
+Group=mongodb
+RuntimeDirectory=mongodb-mms-automation
+RuntimeDirectoryMode=0750
+ExecStart=/opt/mongodb/mongodb-mms-automation-agent/mongodb-mms-automation-agent -f /opt/mongodb/mongodb-mms-automation-agent/local.config -pidfilepath %t/mongodb-mms-automation/mongodb-mms-automation-agent.pid
+StandardOutput=append:/var/log/mongodb-mms-automation/automation-agent-fatal.log
+StandardError=append:/var/log/mongodb-mms-automation/automation-agent-fatal.log
+Restart=on-failure
+RestartSec=5s
+KillMode=control-group
+UMask=027
+TasksMax=infinity
+TasksAccounting=false
+
+[Install]
+WantedBy=multi-user.target

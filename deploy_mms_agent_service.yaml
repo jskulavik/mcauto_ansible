@@ -1,0 +1,44 @@
+---
+- name: Deploy MongoDB MMS Automation Agent
+  hosts: all
+  become: yes
+  vars:
+    artifactory_url: "{{ mms_agent_artifactory_url }}"
+    install_dir: /opt/mongodb/mongodb-mms-automation-agent
+    binary_name: mongodb-mms-automation-agent
+    service_file: mongodb-mms-automation-agent.service
+
+  tasks:
+    - name: Create installation directory
+      ansible.builtin.file:
+        path: "{{ install_dir }}"
+        state: directory
+        owner: mongodb
+        group: mongodb
+        mode: '0755'
+
+    - name: Download MMS Automation Agent binary from Artifactory
+      ansible.builtin.get_url:
+        url: "{{ artifactory_url }}/{{ binary_name }}"
+        dest: "{{ install_dir }}/{{ binary_name }}"
+        owner: mongodb
+        group: mongodb
+        mode: '0755'
+
+    - name: Copy systemd service file
+      ansible.builtin.copy:
+        src: "{{ binary_name }}.service"
+        dest: /usr/lib/systemd/system/{{ service_file }}
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Reload systemd daemon
+      ansible.builtin.systemd:
+        daemon_reload: yes
+
+    - name: Start and enable MongoDB MMS Automation Agent service
+      ansible.builtin.systemd:
+        name: "{{ service_file }}"
+        state: started
+        enabled: yes
