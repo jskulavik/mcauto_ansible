@@ -7,11 +7,22 @@
   tasks:
     - name: Disable transparent huge pages
       block:
+        - name: Check transparent huge pages paths are writable
+          ansible.builtin.stat:
+            path: "{{ item }}"
+          loop:
+            - /sys/kernel/mm/transparent_hugepage/enabled
+            - /sys/kernel/mm/transparent_hugepage/defrag
+          register: thp_path_stats
+
         - name: Disable transparent huge pages at runtime
           ansible.builtin.shell: |
-            echo never > /sys/kernel/mm/transparent_hugepage/enabled
-            echo never > /sys/kernel/mm/transparent_hugepage/defrag
+            echo never | tee /sys/kernel/mm/transparent_hugepage/enabled
+            echo never | tee /sys/kernel/mm/transparent_hugepage/defrag
           changed_when: false
+          when:
+            - thp_path_stats.results[0].stat.writable | default(false)
+            - thp_path_stats.results[1].stat.writable | default(false)
 
         - name: Create systemd service to disable transparent huge pages on boot
           ansible.builtin.copy:
@@ -36,8 +47,8 @@
           ansible.builtin.copy:
             content: |
               #!/bin/bash
-              echo never > /sys/kernel/mm/transparent_hugepage/enabled
-              echo never > /sys/kernel/mm/transparent_hugepage/defrag
+              echo never | tee /sys/kernel/mm/transparent_hugepage/enabled
+              echo never | tee /sys/kernel/mm/transparent_hugepage/defrag
             dest: /usr/local/bin/disable-thp.sh
             owner: root
             group: root
