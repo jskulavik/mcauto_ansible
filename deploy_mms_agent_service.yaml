@@ -9,6 +9,22 @@
     service_file: mongodb-mms-automation-agent.service
 
   tasks:
+    - name: Create mongodb group
+      ansible.builtin.group:
+        name: mongodb
+        state: present
+        system: yes
+
+    - name: Create mongodb user
+      ansible.builtin.user:
+        name: mongodb
+        group: mongodb
+        state: present
+        system: yes
+        shell: /bin/false
+        home: /opt/mongodb
+        create_home: no
+
     - name: Create installation directory
       ansible.builtin.file:
         path: "{{ install_dir }}"
