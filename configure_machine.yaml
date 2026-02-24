@@ -1,0 +1,137 @@
+---
+- name: Configure target machines for MongoDB
+  hosts: all
+  become: yes
+  gather_facts: true
+
+  tasks:
+    - name: Disable transparent huge pages
+      block:
+        - name: Disable transparent huge pages at runtime
+          ansible.builtin.shell: |
+            echo never > /sys/kernel/mm/transparent_hugepage/enabled
+            echo never > /sys/kernel/mm/transparent_hugepage/defrag
+          changed_when: false
+
+        - name: Create systemd service to disable transparent huge pages on boot
+          ansible.builtin.copy:
+            content: |
+              [Unit]
+              Description=Disable transparent huge pages
+              After=network.target
+
+              [Service]
+              Type=oneshot
+              ExecStart=/usr/local/bin/disable-thp.sh
+              RemainAfterExit=yes
+
+              [Install]
+              WantedBy=multi-user.target
+            dest: /etc/systemd/system/disable-thp.service
+            owner: root
+            group: root
+            mode: '0644'
+
+        - name: Create disable-thp startup script
+          ansible.builtin.copy:
+            content: |
+              #!/bin/bash
+              echo never > /sys/kernel/mm/transparent_hugepage/enabled
+              echo never > /sys/kernel/mm/transparent_hugepage/defrag
+            dest: /usr/local/bin/disable-thp.sh
+            owner: root
+            group: root
+            mode: '0755'
+
+        - name: Enable and start disable-thp service
+          ansible.builtin.systemd:
+            name: disable-thp
+            enabled: yes
+            state: started
+            daemon_reload: yes
+
+    - name: Configure vm.swappiness
+      ansible.posix.sysctl:
+        name: vm.swappiness
+        value: '1'
+        state: present
+        sysctl_set: yes
+        reload: yes
+
+    - name: Configure kernel.pid_max
+      ansible.posix.sysctl:
+        name: kernel.pid_max
+        value: '64000'
+        state: present
+        sysctl_set: yes
+        reload: yes
+
+    - name: Configure ulimits for mongodb user
+      block:
+        - name: Create limits configuration file
+          ansible.builtin.copy:
+            content: |
+              mongodb soft fsize unlimited
+              mongodb hard fsize unlimited
+              mongodb soft cpu unlimited
+              mongodb hard cpu unlimited
+              mongodb soft as unlimited
+              mongodb hard as unlimited
+              mongodb soft memlock unlimited
+              mongodb hard memlock unlimited
+              mongodb soft nofile 64000
+              mongodb hard nofile 64000
+              mongodb soft nproc 64000
+              mongodb hard nproc 64000
+              mongodb soft msgqueue unlimited
+              mongodb hard msgqueue unlimited
+            dest: /etc/security/limits.d/99-mongodb.conf
+            owner: root
+            group: root
+            mode: '0644'
+
+        - name: Configure default ulimits in PAM
+          ansible.builtin.lineinfile:
+            path: /etc/pam.d/common-session
+            line: session required pam_limits.so
+            state: present
+          when: ansible_os_family == 'Debian'
+          tags: pam_config
+
+        - name: Configure default ulimits in PAM (RedHat)
+          ansible.builtin.lineinfile:
+            path: /etc/pam.d/system-auth
+            line: session required pam_limits.so
+            state: present
+          when: ansible_os_family == 'RedHat'
+          tags: pam_config
+
+        - name: Configure default ulimits in PAM (RedHat - common)
+          ansible.builtin.lineinfile:
+            path: /etc/pam.d/common-session
+            line: session required pam_limits.so
+            state: present
+          when: ansible_os_family == 'RedHat'
+          tags: pam_config
+
+    - name: Verify configurations
+      block:
+        - name: Check transparent huge pages status
+          ansible.builtin.shell: |
+            cat /sys/kernel/mm/transparent_hugepage/enabled
+            cat /sys/kernel/mm/transparent_hugepage/defrag
+          register: thp_status
+          changed_when: false
+
+        - name: Check vm.swappiness setting
+          ansible.builtin.shell: sysctl vm.swappiness
+          register: swappiness_status
+          changed_when: false
+
+        - name: Display transparent huge pages status
+          ansible.builtin.debug:
+            msg: "{{ thp_status.stdout }}"
+
+        - name: Display vm.swappiness status
+          ansible.builtin.debug:
+            msg: "{{ swappiness_status.stdout }}"
