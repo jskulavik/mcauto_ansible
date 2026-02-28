@@ -1,0 +1,29 @@
+---
+- name: Download and extract mongosh
+  hosts: all
+  become: yes
+  gather_facts: false
+  vars:
+    mongosh_version: "2.5.6"
+    mongosh_archive: "mongosh-{{ mongosh_version }}-linux-x64-openssl11.tgz"
+    mongosh_url: "{{ mc_artifactory_url }}archive-external-release/com/mastercard/operations/linux/mongodb/mongo_sh/{{ mongosh_archive }}"
+    mongosh_install_dir: /opt/mongodb/product
+
+  tasks:
+    - name: Ensure mongosh install directory exists
+      ansible.builtin.file:
+        path: "{{ mongosh_install_dir }}"
+        state: directory
+        mode: "0755"
+
+    - name: Download mongosh archive
+      ansible.builtin.get_url:
+        url: "{{ mongosh_url }}"
+        dest: "{{ mongosh_install_dir }}/{{ mongosh_archive }}"
+        mode: "0644"
+
+    - name: Extract mongosh archive
+      ansible.builtin.unarchive:
+        src: "{{ mongosh_install_dir }}/{{ mongosh_archive }}"
+        dest: "{{ mongosh_install_dir }}"
+        remote_src: true

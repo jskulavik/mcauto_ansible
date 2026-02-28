@@ -1,0 +1,11 @@
+ops_manager_url: "https://mopsmgr-stage-db.test.mastercard-uscentral.sep:8443"
+ops_manager_api_key: "username"
+ops_manager_api_secret: "secret-key"
+group_id: "group-id"
+ops_manager_notification_email: "admin.email@mastercard.com"
+
+monitoring_agent_version: "11.0.0"
+backup_agent_version: "11.0.0"
+
+mms_agent_url: "{{ ops_manager_url }}/download/agent/automation/mongodb-mms-automation-agent-108.0.13.8870-1.rhel8_x86_64.tar.gz"
+mc_artifactory_url: https://artifacts.mastercard.int:443/artifactory/

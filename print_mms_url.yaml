@@ -1,0 +1,12 @@
+---
+- name: Print MMS Agent Artifactory URL
+  hosts: all
+  gather_facts: false
+  tasks:
+    - name: Display mms_agent_url value
+      ansible.builtin.debug:
+        msg: "mms_agent_url: {{ mms_agent_url }}"
+      
+    - name: Display mc_artifactory_url value
+      ansible.builtin.debug:
+        msg: "mc_artifactory_url: {{ mc_artifactory_url }}"

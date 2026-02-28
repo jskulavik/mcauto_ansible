@@ -1,0 +1,13 @@
+{{ mongodb_log_dir }}/*.log {
+  daily
+  rotate 14
+  compress
+  delaycompress
+  notifempty
+  create 0640 mongodb mongodb
+  sharedscripts
+  postrotate
+    /bin/kill -SIGUSR1 `cat /var/run/mongodb.pid 2> /dev/null` 2> /dev/null || true
+  endscript
+  missingok
+}

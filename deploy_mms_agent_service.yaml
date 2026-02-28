@@ -3,7 +3,7 @@
   hosts: all
   become: yes
   vars:
-    artifactory_url: "{{ mms_agent_artifactory_url }}"
+    artifactory_url: "{{ mms_agent_url }}"
     install_dir: /opt/mongodb/mongodb-mms-automation-agent
     binary_name: mongodb-mms-automation-agent
     service_file: mongodb-mms-automation-agent.service
@@ -35,11 +35,30 @@
 
     - name: Download MMS Automation Agent binary from Artifactory
       ansible.builtin.get_url:
-        url: "{{ artifactory_url }}/{{ binary_name }}"
+        url: "{{ mms_agent_url }}"
         dest: "{{ install_dir }}/{{ binary_name }}"
         owner: mongodb
         group: mongodb
         mode: '0755'
+
+    - name: Create local.config for MMS Automation Agent
+      ansible.builtin.copy:
+        dest: "{{ install_dir }}/local.config"
+        owner: mongodb
+        group: mongodb
+        mode: '0644'
+        content: |
+          mmsGroupId=<Insert Group IP Here>
+          mmsApiKey=<Insert Agent API Key Here>
+          mmsBaseUrl=https://mopsmgr-stage-db.test.mastercard-uscentral.sep:8443
+          logFile=/data/mongodb/logs/automation-agent.log
+
+    - name: Create symbolic link to mms agent binary
+      ansible.builtin.file:
+        src: /opt/mongodb/mongodb-mms-automation-agent-108.0.13.8870-1.rhel8_x86_64/mongodb-linux-x86_64-enterprise-rhel88-8.2.0
+        dest: /opt/mongodb/product
+        state: link
+        force: yes
 
     - name: Copy systemd service file
       ansible.builtin.copy:

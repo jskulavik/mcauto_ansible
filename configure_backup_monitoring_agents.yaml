@@ -1,0 +1,217 @@
+---
+- name: Configure MongoDB Ops Manager Backup and Monitoring Agents
+  hosts: all
+  become: yes
+  gather_facts: yes
+  vars:
+    mongodb_data_dir: /data/mongodb
+    mongodb_log_dir: "{{ mongodb_data_dir }}/logs"
+    mongodb_binary_dir: /opt/mongodb/product
+    ops_manager_api_url: "{{ ops_manager_url }}"
+    ops_manager_api_user: "{{ ops_manager_api_key }}"
+    ops_manager_api_key: "{{ ops_manager_api_secret }}"
+
+  pre_tasks:
+    - name: Validate required variables
+      assert:
+        that:
+          - ops_manager_url is defined and ops_manager_url != ""
+          - ops_manager_api_key is defined and ops_manager_api_key != ""
+          - ops_manager_api_secret is defined and ops_manager_api_secret != ""
+          - group_id is defined and group_id != ""
+        fail_msg: "Missing required variables: ops_manager_url, ops_manager_api_key, ops_manager_api_secret, group_id"
+
+    - name: Create required directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: mongodb
+        group: mongodb
+        mode: '0755'
+      loop:
+        - "{{ mongodb_data_dir }}"
+        - "{{ mongodb_log_dir }}"
+        - "{{ mongodb_binary_dir }}"
+
+  tasks:
+    - name: Get current automation configuration
+      ansible.builtin.uri:
+        url: "{{ ops_manager_api_url }}/api/public/v1.0/groups/{{ group_id }}/automationConfig"
+        method: GET
+        user: "{{ ops_manager_api_user }}"
+        password: "{{ ops_manager_api_key }}"
+        force_basic_auth: yes
+        validate_certs: no
+        return_content: yes
+      register: automation_config
+      changed_when: false
+      retries: 3
+      delay: 5
+
+    - name: Configure monitoring agent settings
+      block:
+        - name: Set monitoring agent configuration
+          ansible.builtin.set_fact:
+            monitoring_config:
+              - name: "mmsMonitoring"
+                processType: "monitoring"
+                version: "{{ monitoring_agent_version | default('') }}"
+                hostname: "{{ ansible_fqdn }}"
+                logPath: "{{ mongodb_log_dir }}/monitoring-agent.log"
+                binariesPath: "{{ mongodb_binary_dir }}/monitoring"
+
+        - name: Update monitoring agent in automation config
+          ansible.builtin.uri:
+            url: "{{ ops_manager_api_url }}/api/public/v1.0/groups/{{ group_id }}/automationConfig"
+            method: PUT
+            user: "{{ ops_manager_api_user }}"
+            password: "{{ ops_manager_api_key }}"
+            force_basic_auth: yes
+            validate_certs: no
+            status_code: [200, 201]
+            body_format: json
+            body: "{{ automation_config.json | combine({'monitoringVersions': [monitoring_config[0]]}, recursive=True) }}"
+          register: monitoring_update_response
+          retries: 3
+          delay: 5
+
+      rescue:
+        - name: Log monitoring configuration error
+          ansible.builtin.debug:
+            msg: "Failed to configure monitoring agent: {{ ansible_failed_result }}"
+
+    - name: Configure backup agent settings
+      block:
+        - name: Set backup agent configuration
+          ansible.builtin.set_fact:
+            backup_config:
+              - name: "mmsBackup"
+                processType: "backup"
+                version: "{{ backup_agent_version | default('') }}"
+                hostname: "{{ ansible_fqdn }}"
+                logPath: "{{ mongodb_log_dir }}/backup-agent.log"
+                binariesPath: "{{ mongodb_binary_dir }}/backup"
+
+        - name: Update backup agent in automation config
+          ansible.builtin.uri:
+            url: "{{ ops_manager_api_url }}/api/public/v1.0/groups/{{ group_id }}/automationConfig"
+            method: PUT
+            user: "{{ ops_manager_api_user }}"
+            password: "{{ ops_manager_api_key }}"
+            force_basic_auth: yes
+            validate_certs: no
+            status_code: [200, 201]
+            body_format: json
+            body: "{{ automation_config.json | combine({'backupVersions': [backup_config[0]]}, recursive=True) }}"
+          register: backup_update_response
+          retries: 3
+          delay: 5
+
+      rescue:
+        - name: Log backup configuration error
+          ansible.builtin.debug:
+            msg: "Failed to configure backup agent: {{ ansible_failed_result }}"
+
+    - name: Configure log rotations for MongoDB logs
+      block:
+        - name: Create logrotate configuration for MongoDB logs
+          ansible.builtin.template:
+            src: mongodb-logrotate.j2
+            dest: /etc/logrotate.d/mongodb
+            owner: root
+            group: root
+            mode: '0644'
+
+      rescue:
+        - name: Log logrotate configuration error
+          ansible.builtin.debug:
+            msg: "Warning: Could not configure logrotate for MongoDB logs"
+
+    - name: Apply automation configuration
+      block:
+        - name: Wait for configuration to be applied
+          ansible.builtin.uri:
+            url: "{{ ops_manager_api_url }}/api/public/v1.0/groups/{{ group_id }}/automationStatus"
+            method: GET
+            user: "{{ ops_manager_api_user }}"
+            password: "{{ ops_manager_api_key }}"
+            force_basic_auth: yes
+            validate_certs: no
+            return_content: yes
+          register: config_status
+          until: config_status.json.goalVersion == config_status.json.processes[0].lastVersionApplied | default(0)
+          retries: 30
+          delay: 10
+          when: config_status.json is defined
+
+      rescue:
+        - name: Log configuration status error
+          ansible.builtin.debug:
+            msg: "Warning: Could not verify automation configuration status"
+
+    - name: Configure monitoring alert rules
+      block:
+        - name: Set up monitoring rules via API
+          ansible.builtin.uri:
+            url: "{{ ops_manager_api_url }}/api/public/v1.0/groups/{{ group_id }}/alertConfigs"
+            method: POST
+            user: "{{ ops_manager_api_user }}"
+            password: "{{ ops_manager_api_key }}"
+            force_basic_auth: yes
+            validate_certs: no
+            status_code: [200, 201, 409]
+            body_format: json
+            body:
+              eventTypeName: "{{ item.event_type }}"
+              enabled: true
+              notifications:
+                - typeName: "EMAIL"
+                  recipient: "{{ ops_manager_notification_email }}"
+          loop:
+            - { event_type: "HOST_DOWN" }
+            - { event_type: "REPLICATION_OPLOG_WINDOW_RUNNING_OUT" }
+            - { event_type: "BACKUP_FAILED" }
+            - { event_type: "BACKUP_INCOMPLETE" }
+          when: ops_manager_notification_email is defined
+          ignore_errors: yes
+
+      rescue:
+        - name: Log alert configuration error
+          ansible.builtin.debug:
+            msg: "Warning: Could not configure alert rules"
+
+  post_tasks:
+    - name: Verify agent process directories exist
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: mongodb
+        group: mongodb
+        mode: '0755'
+      loop:
+        - "{{ mongodb_binary_dir }}/monitoring"
+        - "{{ mongodb_binary_dir }}/backup"
+        - "{{ mongodb_log_dir }}"
+
+    - name: Set appropriate permissions on log directory
+      ansible.builtin.file:
+        path: "{{ mongodb_log_dir }}"
+        state: directory
+        owner: mongodb
+        group: mongodb
+        mode: '0755'
+        recurse: no
+
+    - name: Display configuration summary
+      ansible.builtin.debug:
+        msg:
+          - "========================================"
+          - "MongoDB Ops Manager Agent Configuration"
+          - "========================================"
+          - "Ops Manager URL: {{ ops_manager_api_url }}"
+          - "Group ID: {{ group_id }}"
+          - "Log Directory: {{ mongodb_log_dir }}"
+          - "Binary Directory: {{ mongodb_binary_dir }}"
+          - "Monitoring Agent Config: {{ monitoring_config[0] if monitoring_config is defined else 'Not configured' }}"
+          - "Backup Agent Config: {{ backup_config[0] if backup_config is defined else 'Not configured' }}"
+          - "========================================"
