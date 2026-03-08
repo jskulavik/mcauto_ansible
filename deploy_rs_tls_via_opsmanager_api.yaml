@@ -1,0 +1,214 @@
+---
+- name: Deploy MongoDB Replica Set with TLS via Ops Manager API
+  hosts: localhost
+  gather_facts: false
+  
+  vars:
+    # Replica Set Configuration
+    replica_set_name: "rs0"
+    mongodb_version: "8.0.2-ent"
+    mongodb_port: 27017
+    
+    # TLS Configuration
+    tls_mode: "preferTLS"  # change to requireTLS after replica set is operational
+    tls_ca_file_path: "/etc/ssl/mongodb/mastercard-ca.pem"
+    tls_certificate_key_file_path: "/etc/ssl/mongodb/mastercard.pem"
+    
+    # Cluster Authentication
+    cluster_auth_mode: "x509"
+    
+    # Storage and System Configuration
+    mongodb_data_dir: "/var/lib/mongo"
+    mongodb_log_path: "/var/log/mongodb/mongod.log"
+    
+    # Override this to target a specific group: -e "mongodb_inventory_group=mygroup"
+    mongodb_inventory_group: "node_containers"
+    
+    # This can be overridden at runtime: -e "replica_set_members=['host1', 'host2']"
+    replica_set_members: "{{ groups[mongodb_inventory_group] | map('extract', hostvars, 'ansible_host') | list if replica_set_members is not defined else replica_set_members }}"
+    
+  pre_tasks:
+    - name: Validate required variables
+      ansible.builtin.assert:
+        that:
+          - ops_manager_url is defined and ops_manager_url | length > 0
+          - ops_manager_api_key is defined and ops_manager_api_key | length > 0
+          - ops_manager_api_secret is defined and ops_manager_api_secret | length > 0
+          - group_id is defined and group_id | length > 0
+          - mongodb_inventory_group in groups
+          - replica_set_members | length >= 1
+        fail_msg: |
+          Required variables missing. Ensure the following are defined:
+          - ops_manager_url, ops_manager_api_key, ops_manager_api_secret, group_id (from inventory)
+          - mongodb_inventory_group must exist in inventory (current: {{ mongodb_inventory_group | default('not set') }})
+          - At least one host must be in the {{ mongodb_inventory_group | default('target') }} group
+          
+    - name: Display deployment configuration
+      ansible.builtin.debug:
+        msg:
+          - "Ops Manager URL: {{ ops_manager_url }}"
+          - "Group ID: {{ group_id }}"
+          - "Replica Set Name: {{ replica_set_name }}"
+          - "MongoDB Version: {{ mongodb_version }}"
+          - "TLS Mode: {{ tls_mode }}"
+          - "Cluster Auth Mode: {{ cluster_auth_mode }}"
+          - "Inventory Group: {{ mongodb_inventory_group }}"
+          - "Members: {{ replica_set_members }}"
+  
+  tasks:
+    - name: Get current automation configuration
+      ansible.builtin.uri:
+        url: "{{ ops_manager_url }}/api/public/v1.0/groups/{{ group_id }}/automationConfig"
+        method: GET
+        user: "{{ ops_manager_api_key }}"
+        password: "{{ ops_manager_api_secret }}"
+        force_basic_auth: true
+        validate_certs: false
+        headers:
+          Content-Type: "application/json"
+        status_code: 200
+      register: current_automation_config
+      
+    - name: Extract current configuration
+      ansible.builtin.set_fact:
+        automation_config: "{{ current_automation_config.json }}"
+        
+    - name: Build replica set member configurations
+      ansible.builtin.set_fact:
+        rs_members: "{{ rs_members | default([]) + [member_config] }}"
+      vars:
+        member_config:
+          _id: "{{ idx }}"
+          host: "{{ item }}"
+          priority: "{{ 1 if idx == 0 else 1 }}"
+          votes: 1
+          arbiterOnly: false
+          hidden: false
+          secondaryDelaySecs: 0
+          slaveDelay: 0
+      loop: "{{ replica_set_members }}"
+      loop_control:
+        index_var: idx
+        
+    - name: Build process configurations for replica set members
+      ansible.builtin.set_fact:
+        processes: "{{ processes | default([]) + [process_config] }}"
+      vars:
+        process_config:
+          args2_6:
+            net:
+              bindIp: "0.0.0.0"
+              port: "{{ mongodb_port }}"
+              tls:
+                mode: "{{ tls_mode }}"
+                certificateKeyFile: "{{ tls_certificate_key_file_path }}"
+                CAFile: "{{ tls_ca_file_path }}"
+            replication:
+              replSetName: "{{ replica_set_name }}"
+            security:
+              authorization: "enabled"
+              clusterAuthMode: "{{ cluster_auth_mode }}"
+            storage:
+              dbPath: "{{ mongodb_data_dir }}"
+              journal:
+                enabled: true
+            systemLog:
+              destination: "file"
+              path: "{{ mongodb_log_path }}"
+              logAppend: true
+            processManagement:
+              fork: true
+          authSchemaVersion: 5
+          disabled: false
+          featureCompatibilityVersion: "{{ mongodb_version.split('.')[0:2] | join('.') }}"
+          hostname: "{{ item }}"
+          logRotate:
+            sizeThresholdMB: 1000
+            timeThresholdHrs: 24
+          manualMode: false
+          name: "{{ item }}:{{ mongodb_port }}"
+          processType: "mongod"
+          version: "{{ mongodb_version }}"
+      loop: "{{ replica_set_members }}"
+      
+    - name: Build replica set configuration
+      ansible.builtin.set_fact:
+        replica_set_config:
+          _id: "{{ replica_set_name }}"
+          members: "{{ rs_members }}"
+          protocolVersion: 1
+          settings:
+            chainingAllowed: true
+            electionTimeoutMillis: 10000
+            heartbeatIntervalMillis: 2000
+            heartbeatTimeoutSecs: 10
+            catchUpTimeoutMillis: -1
+            catchUpTakeoverDelayMillis: 30000
+            getLastErrorModes: {}
+            getLastErrorDefaults:
+              w: 1
+              wtimeout: 0
+            replicaSetId: null
+            
+    - name: Update automation config with new replica set
+      ansible.builtin.set_fact:
+        updated_automation_config: "{{ automation_config | combine(updates, recursive=true) }}"
+      vars:
+        updates:
+          processes: "{{ (automation_config.processes | default([])) + processes }}"
+          replicaSets: "{{ (automation_config.replicaSets | default([])) + [replica_set_config] }}"
+          
+    - name: Display updated configuration (debug)
+      ansible.builtin.debug:
+        msg:
+          - "Total processes: {{ updated_automation_config.processes | length }}"
+          - "Total replica sets: {{ updated_automation_config.replicaSets | length }}"
+      when: ansible_verbosity >= 1
+      
+    - name: Submit updated automation configuration to Ops Manager
+      ansible.builtin.uri:
+        url: "{{ ops_manager_url }}/api/public/v1.0/groups/{{ group_id }}/automationConfig"
+        method: PUT
+        user: "{{ ops_manager_api_key }}"
+        password: "{{ ops_manager_api_secret }}"
+        force_basic_auth: true
+        validate_certs: false
+        headers:
+          Content-Type: "application/json"
+        body: "{{ updated_automation_config | to_json }}"
+        body_format: json
+        status_code: 201
+      register: automation_update_result
+      
+    - name: Display automation update result
+      ansible.builtin.debug:
+        msg: "Automation configuration updated successfully. Goal state version: {{ automation_update_result.json.goalVersion | default('N/A') }}"
+        
+    - name: Wait for automation goal state (optional)
+      ansible.builtin.uri:
+        url: "{{ ops_manager_url }}/api/public/v1.0/groups/{{ group_id }}/automationStatus"
+        method: GET
+        user: "{{ ops_manager_api_key }}"
+        password: "{{ ops_manager_api_secret }}"
+        force_basic_auth: true
+        validate_certs: false
+        headers:
+          Content-Type: "application/json"
+        status_code: 200
+      register: automation_status
+      until: automation_status.json.goalVersion == automation_status.json.processes | map(attribute='lastGoalVersionAchieved') | list | min | default(0)
+      retries: 60
+      delay: 10
+      when: wait_for_goal_state | default(true) | bool
+      
+    - name: Display final deployment status
+      ansible.builtin.debug:
+        msg:
+          - "- Replica set '{{ replica_set_name }}' deployment initiated via Ops Manager"
+          - "- TLS Mode: {{ tls_mode }}"
+          - "- Cluster Authentication: {{ cluster_auth_mode }}"
+          - "- MongoDB Version: {{ mongodb_version }}"
+          - "- Members: {{ replica_set_members | length }}"
+          - ""
+          - "Monitor deployment progress in Ops Manager UI:"
+          - "{{ ops_manager_url }}/v2/{{ group_id }}#/deployment"

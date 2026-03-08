@@ -1,0 +1,200 @@
+---
+- name: Update MongoDB Replica Set Encryption and Audit Configuration via Ops Manager API
+  hosts: all
+  gather_facts: false
+  
+  vars:
+    # Target replica set to update
+    replica_set_name: "rs0"
+    
+    # Encryption at Rest Configuration
+    enable_encryption: true
+    encryption_key_file: "/etc/mongodb-encryption-keyfile"
+    encryption_cipher_mode: "AES256-CBC"  # Options: AES256-CBC, AES256-GCM
+    
+    # Audit Configuration
+    audit_destination: "file"  # Options: console, syslog, file
+    audit_path: "/var/log/mongodb/auditLog.json"
+    audit_format: "JSON"  # Options: JSON, BSON
+    
+    # Audit Filters - MongoDB audit filter expression
+    # Example filters:
+    # - All operations: '{}'
+    # - Authentication events only: '{ atype: { $in: [ "authenticate", "authCheck" ] } }'
+    # - Admin database operations: '{ "param.ns": { $regex: "^admin\\." } }'
+    # - DDL operations: '{ atype: { $in: [ "createCollection", "dropCollection", "createIndex", "dropIndex" ] } }'
+    audit_filter: |
+      {
+        atype: {
+          $in: [
+            "authenticate",
+            "authCheck",
+            "createCollection",
+            "dropCollection",
+            "createDatabase",
+            "dropDatabase",
+            "createIndex",
+            "dropIndex",
+            "createUser",
+            "dropUser",
+            "dropAllUsersFromDatabase",
+            "updateUser",
+            "grantRolesToUser",
+            "revokeRolesFromUser",
+            "createRole",
+            "updateRole",
+            "dropRole",
+            "dropAllRolesFromDatabase",
+            "grantRolesToRole",
+            "revokeRolesFromRole",
+            "grantPrivilegesToRole",
+            "revokePrivilegesFromRole",
+            "shutdown",
+            "applicationMessage"
+          ]
+        }
+      }
+    
+    # Retry configuration for log rotation
+    audit_log_rotate_max_size_mb: 1000
+    
+  pre_tasks:
+    - name: Validate required variables
+      ansible.builtin.assert:
+        that:
+          - ops_manager_url is defined and ops_manager_url | length > 0
+          - ops_manager_api_key is defined and ops_manager_api_key | length > 0
+          - ops_manager_api_secret is defined and ops_manager_api_secret | length > 0
+          - group_id is defined and group_id | length > 0
+          - replica_set_name is defined and replica_set_name | length > 0
+        fail_msg: |
+          Required variables missing. Ensure the following are defined:
+          - ops_manager_url, ops_manager_api_key, ops_manager_api_secret, group_id (from inventory)
+          - replica_set_name (replica set to update)
+          
+    - name: Display update configuration
+      ansible.builtin.debug:
+        msg:
+          - "Ops Manager URL: {{ ops_manager_url }}"
+          - "Group ID: {{ group_id }}"
+          - "Replica Set: {{ replica_set_name }}"
+          - "Enable Encryption: {{ enable_encryption }}"
+          - "Encryption Key File: {{ encryption_key_file }}"
+          - "Audit Destination: {{ audit_destination }}"
+          - "Audit Path: {{ audit_path }}"
+          - "Audit Format: {{ audit_format }}"
+  
+  tasks:
+    - name: Get current automation configuration
+      ansible.builtin.uri:
+        url: "{{ ops_manager_url }}/api/public/v1.0/groups/{{ group_id }}/automationConfig"
+        method: GET
+        user: "{{ ops_manager_api_key }}"
+        password: "{{ ops_manager_api_secret }}"
+        force_basic_auth: true
+        validate_certs: false
+        headers:
+          Content-Type: "application/json"
+        status_code: 200
+      register: current_automation_config
+      
+    - name: Extract current configuration
+      ansible.builtin.set_fact:
+        automation_config: "{{ current_automation_config.json }}"
+        
+    - name: Find replica set processes
+      ansible.builtin.set_fact:
+        target_processes: "{{ automation_config.processes | selectattr('args2_6.replication.replSetName', 'defined') | selectattr('args2_6.replication.replSetName', 'equalto', replica_set_name) | list }}"
+        
+    - name: Validate replica set exists
+      ansible.builtin.assert:
+        that:
+          - target_processes | length > 0
+        fail_msg: "No processes found for replica set '{{ replica_set_name }}'. Available replica sets: {{ automation_config.replicaSets | map(attribute='_id') | list }}"
+        
+    - name: Display found processes
+      ansible.builtin.debug:
+        msg: "Found {{ target_processes | length }} processes in replica set '{{ replica_set_name }}'"
+        
+    - name: Build encryption configuration
+      ansible.builtin.set_fact:
+        encryption_config:
+          enableEncryption: "{{ enable_encryption }}"
+          encryptionKeyFile: "{{ encryption_key_file }}"
+          encryptionCipherMode: "{{ encryption_cipher_mode }}"
+      when: enable_encryption | bool
+      
+    - name: Build audit log configuration
+      ansible.builtin.set_fact:
+        audit_config:
+          destination: "{{ audit_destination }}"
+          format: "{{ audit_format }}"
+          filter: "{{ audit_filter | trim }}"
+          path: "{{ audit_path if audit_destination == 'file' else omit }}"
+          
+    - name: Update processes with encryption and audit settings
+      ansible.builtin.set_fact:
+        updated_processes: "{{ updated_processes | default([]) + [updated_process] }}"
+      vars:
+        # Find the current process in automation_config
+        current_process: "{{ automation_config.processes | selectattr('name', 'equalto', item.name) | first }}"
+        # Merge encryption settings into security section
+        security_updates: "{{ current_process.args2_6.security | default({}) | combine({'enableEncryption': encryption_config.enableEncryption, 'encryptionKeyFile': encryption_config.encryptionKeyFile, 'encryptionCipherMode': encryption_config.encryptionCipherMode} if enable_encryption else {}) }}"
+        # Build the updated process with security and auditLog
+        updated_process: "{{ current_process | combine({'args2_6': current_process.args2_6 | combine({'security': security_updates, 'auditLog': audit_config})}, recursive=true) }}"
+      loop: "{{ target_processes }}"
+      
+    - name: Build final process list
+      ansible.builtin.set_fact:
+        final_processes: "{{ final_processes | default([]) + [(updated_processes | selectattr('name', 'equalto', item.name) | first) if (updated_processes | selectattr('name', 'equalto', item.name) | list | length > 0) else item] }}"
+      loop: "{{ automation_config.processes }}"
+      
+    - name: Update automation configuration
+      ansible.builtin.set_fact:
+        updated_automation_config: "{{ automation_config | combine({'processes': final_processes}) }}"
+        
+    - name: Display configuration summary
+      ansible.builtin.debug:
+        msg:
+          - "Updating {{ target_processes | length }} processes in replica set '{{ replica_set_name }}'"
+          - "Encryption enabled: {{ enable_encryption }}"
+          - "Audit destination: {{ audit_destination }}"
+      when: ansible_verbosity >= 1
+      
+    - name: Submit updated automation configuration to Ops Manager
+      ansible.builtin.uri:
+        url: "{{ ops_manager_url }}/api/public/v1.0/groups/{{ group_id }}/automationConfig"
+        method: PUT
+        user: "{{ ops_manager_api_key }}"
+        password: "{{ ops_manager_api_secret }}"
+        force_basic_auth: true
+        validate_certs: false
+        headers:
+          Content-Type: "application/json"
+        body: "{{ updated_automation_config | to_json }}"
+        body_format: json
+        status_code: 201
+      register: automation_update_result
+      
+    - name: Display automation update result
+      ansible.builtin.debug:
+        msg: "Automation configuration updated successfully. Goal state version: {{ automation_update_result.json.goalVersion | default('N/A') }}"
+        
+    - name: Wait for automation goal state
+      ansible.builtin.uri:
+        url: "{{ ops_manager_url }}/api/public/v1.0/groups/{{ group_id }}/automationStatus"
+        method: GET
+        user: "{{ ops_manager_api_key }}"
+        password: "{{ ops_manager_api_secret }}"
+        force_basic_auth: true
+        validate_certs: false
+        headers:
+          Content-Type: "application/json"
+        status_code: 200
+      register: automation_status
+      until: >
+        automation_status.json.goalVersion == 
+        (automation_status.json.processes | map(attribute='lastGoalVersionAchieved') | list | min | default(0))
+      retries: 60
+      delay: 10
+      when: wait_for_goal_state | default(true) | bool
