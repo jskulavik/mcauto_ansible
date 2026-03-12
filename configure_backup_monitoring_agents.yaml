@@ -50,27 +50,25 @@
 
     - name: Configure monitoring agent settings
       block:
-        - name: Set monitoring agent configuration
+        - name: Set monitoring log configuration
           ansible.builtin.set_fact:
-            monitoring_config:
-              - name: "mmsMonitoring"
-                processType: "monitoring"
-                version: "{{ monitoring_agent_version | default('') }}"
-                hostname: "{{ ansible_fqdn }}"
-                logPath: "{{ mongodb_log_dir }}/monitoring-agent.log"
-                binariesPath: "{{ mongodb_binary_dir }}/monitoring"
+            monitoring_log_config:
+              logPath: "{{ mongodb_log_dir }}/monitoring-agent.log"
+              logRotate:
+                sizeThresholdMB: {{ monitoring_log_rotate_size_mb | default(1000) }}
+                timeThresholdHrs: {{ monitoring_log_rotate_time_hrs | default(24) }}
 
-        - name: Update monitoring agent in automation config
+        - name: Update monitoring log settings in Ops Manager
           ansible.builtin.uri:
-            url: "{{ ops_manager_api_url }}/api/public/v1.0/groups/{{ group_id }}/automationConfig"
+            url: "{{ ops_manager_api_url }}/api/public/v1.0/groups/{{ group_id }}/automationConfig/monitoringAgentConfig"
             method: PUT
             user: "{{ ops_manager_api_user }}"
             password: "{{ ops_manager_api_key }}"
             force_basic_auth: yes
             validate_certs: no
-            status_code: [200, 201]
+            status_code: [200]
             body_format: json
-            body: "{{ automation_config.json | combine({'monitoringVersions': [monitoring_config[0]]}, recursive=True) }}"
+            body: "{{ monitoring_log_config }}"
           register: monitoring_update_response
           retries: 3
           delay: 5
@@ -86,7 +84,7 @@
           ansible.builtin.set_fact:
             backup_config:
               - name: "mmsBackup"
-                processType: "backup"
+                processType: "mongod"
                 version: "{{ backup_agent_version | default('') }}"
                 hostname: "{{ ansible_fqdn }}"
                 logPath: "{{ mongodb_log_dir }}/backup-agent.log"
@@ -212,6 +210,6 @@
           - "Group ID: {{ group_id }}"
           - "Log Directory: {{ mongodb_log_dir }}"
           - "Binary Directory: {{ mongodb_binary_dir }}"
-          - "Monitoring Agent Config: {{ monitoring_config[0] if monitoring_config is defined else 'Not configured' }}"
+          - "Monitoring Log Config: {{ monitoring_log_config if monitoring_log_config is defined else 'Not configured' }}"
           - "Backup Agent Config: {{ backup_config[0] if backup_config is defined else 'Not configured' }}"
           - "========================================"

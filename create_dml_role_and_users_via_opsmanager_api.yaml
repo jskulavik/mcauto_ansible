@@ -1,0 +1,227 @@
+---
+- name: Create Custom DML Role and Users via Ops Manager API
+  hosts: all
+  gather_facts: false
+
+  vars:
+    # Application identifier — the role will be named {{ app_name }}_dml_rl.
+    # Use alphanumeric characters and underscores only.
+    app_name: "myapp"
+
+    # Database the DML privileges will be scoped to
+    target_database: "mydb"
+
+    # Collection scope — empty string means all collections in target_database
+    target_collection: ""
+
+    # Derived role name; can be overridden with -e "dml_role_name=custom_name"
+    dml_role_name: "{{ app_name }}_dml_rl"
+
+    # List of users to create and assign the DML role.
+    # Each entry requires: username, password
+    # Optional per entry: auth_database (default: admin)
+    dml_users:
+      - username: "{{ app_name }}_svc"
+        password: "changeme"
+        auth_database: "admin"
+
+    # When true, skip re-applying the role definition if it already exists
+    skip_existing_role: false
+
+  pre_tasks:
+    - name: Validate required variables
+      ansible.builtin.assert:
+        that:
+          - ops_manager_url is defined and ops_manager_url | length > 0
+          - ops_manager_api_key is defined and ops_manager_api_key | length > 0
+          - ops_manager_api_secret is defined and ops_manager_api_secret | length > 0
+          - group_id is defined and group_id | length > 0
+          - app_name is defined and app_name | length > 0
+          - target_database is defined and target_database | length > 0
+          - dml_users is defined and dml_users | length > 0
+        fail_msg: |
+          Required variables are missing. Ensure the following are defined:
+          - ops_manager_url, ops_manager_api_key, ops_manager_api_secret, group_id (from inventory)
+          - app_name: application identifier used to derive the role name (<app>_dml_rl)
+          - target_database: database the DML role will grant privileges against
+          - dml_users: list of users to create (each with username and password)
+
+    - name: Display provisioning configuration
+      ansible.builtin.debug:
+        msg:
+          - "Ops Manager URL:    {{ ops_manager_url }}"
+          - "Group ID:           {{ group_id }}"
+          - "Role Name:          {{ dml_role_name }}"
+          - "Target Database:    {{ target_database }}"
+          - "Target Collection:  {{ target_collection if target_collection | length > 0 else '(all collections)' }}"
+          - "Users to provision: {{ dml_users | map(attribute='username') | list }}"
+
+  tasks:
+    # -------------------------------------------------------------------------
+    # Custom Role
+    # -------------------------------------------------------------------------
+
+    - name: Check if custom DML role already exists
+      ansible.builtin.uri:
+        url: "{{ ops_manager_url }}/api/public/v1.0/groups/{{ group_id }}/customDBRoles/roles/{{ dml_role_name }}"
+        method: GET
+        user: "{{ ops_manager_api_key }}"
+        password: "{{ ops_manager_api_secret }}"
+        force_basic_auth: true
+        validate_certs: false
+        headers:
+          Content-Type: "application/json"
+        status_code: [200, 404]
+      register: existing_role_check
+
+    - name: Build DML role payload
+      ansible.builtin.set_fact:
+        dml_role_payload:
+          roleName: "{{ dml_role_name }}"
+          databaseName: "admin"
+          actions:
+            - action: "INSERT"
+              resources:
+                - db: "{{ target_database }}"
+                  collection: "{{ target_collection }}"
+            - action: "UPDATE"
+              resources:
+                - db: "{{ target_database }}"
+                  collection: "{{ target_collection }}"
+            - action: "REMOVE"
+              resources:
+                - db: "{{ target_database }}"
+                  collection: "{{ target_collection }}"
+          inheritedRoles: []
+
+    - name: Create custom DML role
+      ansible.builtin.uri:
+        url: "{{ ops_manager_url }}/api/public/v1.0/groups/{{ group_id }}/customDBRoles/roles"
+        method: POST
+        user: "{{ ops_manager_api_key }}"
+        password: "{{ ops_manager_api_secret }}"
+        force_basic_auth: true
+        validate_certs: false
+        headers:
+          Content-Type: "application/json"
+        body: "{{ dml_role_payload | to_json }}"
+        body_format: json
+        status_code: 200
+      register: role_create_result
+      when: existing_role_check.status == 404
+
+    - name: Update existing custom DML role
+      ansible.builtin.uri:
+        url: "{{ ops_manager_url }}/api/public/v1.0/groups/{{ group_id }}/customDBRoles/roles/{{ dml_role_name }}"
+        method: PATCH
+        user: "{{ ops_manager_api_key }}"
+        password: "{{ ops_manager_api_secret }}"
+        force_basic_auth: true
+        validate_certs: false
+        headers:
+          Content-Type: "application/json"
+        body: "{{ dml_role_payload | to_json }}"
+        body_format: json
+        status_code: 200
+      register: role_update_result
+      when:
+        - existing_role_check.status == 200
+        - not (skip_existing_role | bool)
+
+    - name: Display role provisioning status
+      ansible.builtin.debug:
+        msg: >-
+          Role '{{ dml_role_name }}'
+          {{ 'created' if existing_role_check.status == 404
+             else ('updated' if not (skip_existing_role | bool)
+             else 'skipped (already exists)') }}
+          — INSERT, UPDATE, REMOVE on
+          {{ target_database }}.{{ target_collection if target_collection | length > 0 else '*' }}
+
+    # -------------------------------------------------------------------------
+    # Database Users
+    # -------------------------------------------------------------------------
+
+    - name: Check whether each user already exists
+      ansible.builtin.uri:
+        url: "{{ ops_manager_url }}/api/public/v1.0/groups/{{ group_id }}/databaseUsers/{{ item.auth_database | default('admin') }}/{{ item.username }}"
+        method: GET
+        user: "{{ ops_manager_api_key }}"
+        password: "{{ ops_manager_api_secret }}"
+        force_basic_auth: true
+        validate_certs: false
+        headers:
+          Content-Type: "application/json"
+        status_code: [200, 404]
+      register: existing_user_checks
+      loop: "{{ dml_users }}"
+      loop_control:
+        label: "{{ item.username }}"
+
+    - name: Create new database users with DML role
+      ansible.builtin.uri:
+        url: "{{ ops_manager_url }}/api/public/v1.0/groups/{{ group_id }}/databaseUsers"
+        method: POST
+        user: "{{ ops_manager_api_key }}"
+        password: "{{ ops_manager_api_secret }}"
+        force_basic_auth: true
+        validate_certs: false
+        headers:
+          Content-Type: "application/json"
+        body: "{{ user_payload | to_json }}"
+        body_format: json
+        status_code: 200
+      vars:
+        user_payload:
+          databaseName: "{{ item.item.auth_database | default('admin') }}"
+          username: "{{ item.item.username }}"
+          password: "{{ item.item.password }}"
+          roles:
+            - roleName: "{{ dml_role_name }}"
+              databaseName: "admin"
+      loop: "{{ existing_user_checks.results }}"
+      loop_control:
+        label: "{{ item.item.username }}"
+      when: item.status == 404
+      register: user_create_results
+      no_log: true  # suppress output to prevent password exposure
+
+    - name: Grant DML role to existing users
+      ansible.builtin.uri:
+        url: "{{ ops_manager_url }}/api/public/v1.0/groups/{{ group_id }}/databaseUsers/{{ item.item.auth_database | default('admin') }}/{{ item.item.username }}"
+        method: PATCH
+        user: "{{ ops_manager_api_key }}"
+        password: "{{ ops_manager_api_secret }}"
+        force_basic_auth: true
+        validate_certs: false
+        headers:
+          Content-Type: "application/json"
+        body: "{{ user_update_payload | to_json }}"
+        body_format: json
+        status_code: 200
+      vars:
+        existing_roles: "{{ item.json.roles | default([]) }}"
+        new_role:
+          roleName: "{{ dml_role_name }}"
+          databaseName: "admin"
+        # Merge: strip any prior binding for this role, then append the current definition
+        merged_roles: "{{ existing_roles | rejectattr('roleName', 'equalto', dml_role_name) | list + [new_role] }}"
+        user_update_payload:
+          roles: "{{ merged_roles }}"
+      loop: "{{ existing_user_checks.results }}"
+      loop_control:
+        label: "{{ item.item.username }}"
+      when: item.status == 200
+      register: user_update_results
+      no_log: true  # suppress output to prevent password exposure in merged payload
+
+    - name: Display user provisioning summary
+      ansible.builtin.debug:
+        msg:
+          - "Role '{{ dml_role_name }}' provisioned on {{ target_database }}.{{ target_collection if target_collection | length > 0 else '*' }}"
+          - "User outcomes:"
+          - "{{ existing_user_checks.results
+                | map(attribute='item')
+                | map(attribute='username')
+                | list }}"
+          - "  (404 = created, 200 = DML role merged into existing role list)"

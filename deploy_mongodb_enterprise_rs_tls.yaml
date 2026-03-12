@@ -1,0 +1,224 @@
+---
+- name: Deploy MongoDB Enterprise Advanced Replica Set with TLS
+  hosts: all
+  become: true
+  gather_facts: true
+
+  vars:
+    mongodb_major_version: "8.0.2-ent"
+    mongodb_port: 27017
+    replica_set_name: "rs0"
+
+    mongodb_data_dir: /var/lib/mongo
+    mongodb_log_dir: /var/log/mongodb
+    mongodb_conf_file: /etc/mongod.conf
+
+    tls_cert_key_file: /etc/ssl/mongodb/mastercard.pem
+    tls_ca_file: /etc/ssl/mongodb/mastercard-ca.pem
+
+    mongodb_enterprise_repo_path: "archive-external-release/com/mastercard/operations/linux/mongodb-enterprise/8.0/rhel8/x86_64"
+
+    mongodb_admin_username: ""
+    mongodb_admin_password: ""
+
+  pre_tasks:
+    - name: Validate required variables
+      ansible.builtin.assert:
+        that:
+          - mc_artifactory_url is defined
+          - mc_artifactory_url | length > 0
+        fail_msg: "mc_artifactory_url must be defined in inventory/group_vars/all.yaml"
+
+    - name: Validate supported OS family
+      ansible.builtin.assert:
+        that:
+          - ansible_os_family == "RedHat"
+        fail_msg: "This playbook currently supports RedHat-family systems only"
+
+    - name: Ensure TLS certificate/key file exists
+      ansible.builtin.stat:
+        path: "{{ tls_cert_key_file }}"
+      register: tls_cert_key_stat
+
+    - name: Ensure TLS CA file exists
+      ansible.builtin.stat:
+        path: "{{ tls_ca_file }}"
+      register: tls_ca_stat
+
+    - name: Fail when TLS assets are missing
+      ansible.builtin.assert:
+        that:
+          - tls_cert_key_stat.stat.exists
+          - tls_ca_stat.stat.exists
+        fail_msg: "TLS files are required. Ensure tls_cert_key_file and tls_ca_file are present on each host"
+
+  tasks:
+    - name: Configure MongoDB Enterprise yum repository via Artifactory
+      ansible.builtin.yum_repository:
+        name: mongodb-enterprise-{{ mongodb_major_version }}
+        description: MongoDB Enterprise {{ mongodb_major_version }}
+        baseurl: "{{ mc_artifactory_url.rstrip('/') }}/{{ mongodb_enterprise_repo_path.lstrip('/') }}"
+        enabled: true
+        gpgcheck: false
+
+    - name: Install MongoDB Enterprise packages
+      ansible.builtin.package:
+        name:
+          - mongodb-enterprise
+          - openssl
+        state: present
+
+    - name: Ensure MongoDB directories exist
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: directory
+        owner: mongodb
+        group: mongodb
+        mode: "{{ item.mode }}"
+      loop:
+        - { path: "{{ mongodb_data_dir }}", mode: "0755" }
+        - { path: "{{ mongodb_log_dir }}", mode: "0755" }
+
+    # Once TLS settings are verified on each node, change perferTLS to requireTLS
+    - name: Configure mongod for replica set + TLS preferTLS + auth
+      ansible.builtin.copy:
+        dest: "{{ mongodb_conf_file }}"
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          storage:
+            dbPath: {{ mongodb_data_dir }}
+            journal:
+              enabled: true
+          systemLog:
+            destination: file
+            logAppend: true
+            path: {{ mongodb_log_dir }}/mongod.log
+          net:
+            bindIp: 0.0.0.0
+            port: {{ mongodb_port }}
+            tls:
+              mode: preferTLS
+              certificateKeyFile: {{ tls_cert_key_file }}
+              CAFile: {{ tls_ca_file }}
+          processManagement:
+            fork: false
+          replication:
+            replSetName: {{ replica_set_name }}
+          security:
+            authorization: enabled
+            clusterAuthMode: x509
+          setParameter:
+            authenticationMechanisms: SCRAM-SHA-256
+      notify: Restart mongod
+
+    - name: Enable and start mongod
+      ansible.builtin.systemd:
+        name: mongod
+        enabled: true
+        state: started
+
+    - name: Flush handlers to apply mongod configuration
+      ansible.builtin.meta: flush_handlers
+
+    - name: Wait for mongod port
+      ansible.builtin.wait_for:
+        host: "127.0.0.1"
+        port: "{{ mongodb_port }}"
+        delay: 2
+        timeout: 60
+
+    - name: Initialize replica set on first host
+      ansible.builtin.shell: |
+        mongosh --quiet --host 127.0.0.1 --port {{ mongodb_port }} --eval '
+        const cfg = {
+          _id: "{{ replica_set_name }}",
+          members: [
+          {% for host in ansible_play_hosts_all %}
+            { _id: {{ loop.index0 }}, host: "{{ hostvars[host].ansible_host | default(host) }}:{{ mongodb_port }}" }{% if not loop.last %},{% endif %}
+          {% endfor %}
+          ]
+        };
+        try {
+          rs.status();
+          print("Replica set already initialized");
+        } catch (e) {
+          rs.initiate(cfg);
+          print("Replica set initialized");
+        }
+        '
+      args:
+        executable: /bin/bash
+      register: rs_init_result
+      changed_when: "'Replica set initialized' in rs_init_result.stdout"
+      run_once: true
+      delegate_to: "{{ ansible_play_hosts_all[0] }}"
+
+    - name: Wait for primary election
+      ansible.builtin.shell: |
+        mongosh --quiet --host 127.0.0.1 --port {{ mongodb_port }} --eval '
+        const hello = db.hello();
+        if (!hello.isWritablePrimary) { quit(1); }
+        '
+      args:
+        executable: /bin/bash
+      register: primary_check
+      retries: 20
+      delay: 3
+      until: primary_check.rc == 0
+      changed_when: false
+      run_once: true
+      delegate_to: "{{ ansible_play_hosts_all[0] }}"
+
+    - name: Create admin user marker
+      ansible.builtin.set_fact:
+        mongodb_admin_marker: "{{ mongodb_data_dir }}/.admin_user_created"
+      run_once: true
+      delegate_to: "{{ ansible_play_hosts_all[0] }}"
+
+    - name: Check if admin user was created previously
+      ansible.builtin.stat:
+        path: "{{ mongodb_admin_marker }}"
+      register: admin_marker_stat
+      run_once: true
+      delegate_to: "{{ ansible_play_hosts_all[0] }}"
+
+    - name: Create admin user (optional)
+      ansible.builtin.shell: |
+        mongosh --quiet --host 127.0.0.1 --port {{ mongodb_port }} --eval '
+        db.getSiblingDB("admin").createUser({
+          user: "{{ mongodb_admin_username }}",
+          pwd: "{{ mongodb_admin_password }}",
+          roles: [ { role: "root", db: "admin" } ]
+        });
+        '
+      args:
+        executable: /bin/bash
+      no_log: true
+      run_once: true
+      delegate_to: "{{ ansible_play_hosts_all[0] }}"
+      when:
+        - mongodb_admin_username | length > 0
+        - mongodb_admin_password | length > 0
+        - not admin_marker_stat.stat.exists
+
+    - name: Mark admin user creation complete
+      ansible.builtin.file:
+        path: "{{ mongodb_admin_marker }}"
+        state: touch
+        owner: mongodb
+        group: mongodb
+        mode: "0600"
+      run_once: true
+      delegate_to: "{{ ansible_play_hosts_all[0] }}"
+      when:
+        - mongodb_admin_username | length > 0
+        - mongodb_admin_password | length > 0
+        - not admin_marker_stat.stat.exists
+
+  handlers:
+    - name: Restart mongod
+      ansible.builtin.systemd:
+        name: mongod
+        state: restarted
