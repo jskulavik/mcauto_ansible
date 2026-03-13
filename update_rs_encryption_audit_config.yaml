@@ -143,15 +143,31 @@
         # Build the updated process with security and auditLog
         updated_process: "{{ current_process | combine({'args2_6': current_process.args2_6 | combine({'security': security_updates, 'auditLog': audit_config})}, recursive=true) }}"
       loop: "{{ target_processes }}"
+
+    - name: Re-fetch automation configuration before update
+      ansible.builtin.uri:
+        url: "{{ ops_manager_url }}/api/public/v1.0/groups/{{ group_id }}/automationConfig"
+        method: GET
+        user: "{{ ops_manager_api_key }}"
+        password: "{{ ops_manager_api_secret }}"
+        force_basic_auth: true
+        validate_certs: false
+        headers:
+          Content-Type: "application/json"
+        status_code: 200
+      register: current_automation_config_latest
+      changed_when: false
+      retries: 3
+      delay: 5
       
     - name: Build final process list
       ansible.builtin.set_fact:
         final_processes: "{{ final_processes | default([]) + [(updated_processes | selectattr('name', 'equalto', item.name) | first) if (updated_processes | selectattr('name', 'equalto', item.name) | list | length > 0) else item] }}"
-      loop: "{{ automation_config.processes }}"
+      loop: "{{ current_automation_config_latest.json.processes }}"
       
     - name: Update automation configuration
       ansible.builtin.set_fact:
-        updated_automation_config: "{{ automation_config | combine({'processes': final_processes}) }}"
+        updated_automation_config: "{{ current_automation_config_latest.json | combine({'processes': final_processes}) }}"
         
     - name: Display configuration summary
       ansible.builtin.debug:

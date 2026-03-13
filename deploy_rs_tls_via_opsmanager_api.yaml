@@ -149,14 +149,30 @@
               w: 1
               wtimeout: 0
             replicaSetId: null
+
+    - name: Re-fetch automation configuration before update
+      ansible.builtin.uri:
+        url: "{{ ops_manager_url }}/api/public/v1.0/groups/{{ group_id }}/automationConfig"
+        method: GET
+        user: "{{ ops_manager_api_key }}"
+        password: "{{ ops_manager_api_secret }}"
+        force_basic_auth: true
+        validate_certs: false
+        headers:
+          Content-Type: "application/json"
+        status_code: 200
+      register: current_automation_config_latest
+      changed_when: false
+      retries: 3
+      delay: 5
             
     - name: Update automation config with new replica set
       ansible.builtin.set_fact:
-        updated_automation_config: "{{ automation_config | combine(updates, recursive=true) }}"
+        updated_automation_config: "{{ current_automation_config_latest.json | combine(updates, recursive=true) }}"
       vars:
         updates:
-          processes: "{{ (automation_config.processes | default([])) + processes }}"
-          replicaSets: "{{ (automation_config.replicaSets | default([])) + [replica_set_config] }}"
+          processes: "{{ (current_automation_config_latest.json.processes | default([])) + processes }}"
+          replicaSets: "{{ (current_automation_config_latest.json.replicaSets | default([])) + [replica_set_config] }}"
           
     - name: Display updated configuration (debug)
       ansible.builtin.debug:
